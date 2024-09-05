@@ -6,6 +6,34 @@ import logging
 import signal
 from functools import partial
 import re
+import hashlib
+import json
+
+# Blockchain implementation for logging
+class Blockchain:
+    def __init__(self):
+        self.chain = []
+        self.create_block(previous_hash='1')  # Genesis block
+
+    def create_block(self, previous_hash=None):
+        block = {
+            'index': len(self.chain) + 1,
+            'timestamp': time.time(),
+            'previous_hash': previous_hash or self.hash(self.chain[-1]) if self.chain else '1'
+        }
+        self.chain.append(block)
+        return block
+
+    @staticmethod
+    def hash(block):
+        block_string = json.dumps(block, sort_keys=True).encode()
+        return hashlib.sha256(block_string).hexdigest()
+
+    def add_log(self, action, ip_address):
+        block = self.create_block()
+        block['action'] = action
+        block['ip_address'] = ip_address
+        logging.info(f"Log added to blockchain: {block}")
 
 # Extended list of malicious keywords or patterns to check for in requests
 MALICIOUS_PATTERNS = [
@@ -118,12 +146,14 @@ def contains_malicious_content(data):
     return False
 
 class RequestMonitor:
-    def __init__(self, threshold=20, time_window=60):
+    def __init__(self, threshold=20, time_window=60, redirect_url=None, blockchain=None):
         self.request_count = defaultdict(int)
         self.request_times = defaultdict(list)
         self.blocked_ips = set()
         self.threshold = threshold
         self.time_window = time_window
+        self.redirect_url = redirect_url
+        self.blockchain = blockchain
         self.lock = threading.Lock()
 
     def add_request(self, client_address):
@@ -141,8 +171,13 @@ class RequestMonitor:
 
             if self.request_count[client_address] > self.threshold:
                 logging.warning(f"High request volume from {client_address}. Count: {self.request_count[client_address]}")
-                self.block_ip(client_address)
-                return False
+                if self.redirect_url:
+                    if self.blockchain:
+                        self.blockchain.add_log('Redirect', client_address)
+                    return self.redirect_url
+                else:
+                    self.block_ip(client_address)
+                    return False
 
             return True
 
@@ -150,6 +185,8 @@ class RequestMonitor:
         with self.lock:
             self.blocked_ips.add(client_address)
             logging.info(f"Blocked IP address: {client_address}")
+            if self.blockchain:
+                self.blockchain.add_log('Block', client_address)
 
 
 class MonitoringHandler(BaseHTTPRequestHandler):
@@ -158,25 +195,35 @@ class MonitoringHandler(BaseHTTPRequestHandler):
         super().__init__(*args, **kwargs)
 
     def do_GET(self):
-        if not self.request_monitor.add_request(self.client_address[0]):
+        redirect_url = self.request_monitor.add_request(self.client_address[0])
+        if redirect_url is True:
             self.send_error(403, "Your IP has been blocked due to high request volume.")
+            return
+        elif isinstance(redirect_url, str):
+            self.send_response(302)  # Redirect response
+            self.send_header('Location', redirect_url)
+            self.end_headers()
             return
 
         if self.path == "/":
-            # Serve the index.html file
             self.serve_file("index.html", "text/html")
         elif self.path == "/stylesheet.css":
-            # Serve the stylesheet.css file
             self.serve_file("stylesheet.css", "text/css")
         else:
             self.send_error(404, "File Not Found")
 
     def do_POST(self):
-        if not self.request_monitor.add_request(self.client_address[0]):
+        redirect_url = self.request_monitor.add_request(self.client_address[0])
+        if redirect_url is True:
             self.send_error(403, "Your IP has been blocked due to high request volume.")
             return
+        elif isinstance(redirect_url, str):
+            self.send_response(302)  # Redirect response
+            self.send_header('Location', redirect_url)
+            self.end_headers()
+            return
 
-        content_length = int(self.headers['Content-Length'])
+        content_length = int(self.headers.get('Content-Length', 0))
         post_data = self.rfile.read(content_length).decode('utf-8')
 
         if contains_malicious_content(post_data):
@@ -185,4 +232,56 @@ class MonitoringHandler(BaseHTTPRequestHandler):
             return
 
         self.send_response(200)
-        self.end_headers
+        self.end_headers()
+
+    def serve_file(self, file_path, content_type):
+        try:
+            with open(file_path, "r") as file:
+                content = file.read()
+            self.send_response(200)
+            self.send_header("Content-type", content_type)
+            self.end_headers()
+            self.wfile.write(content.encode("utf-8"))
+        except FileNotFoundError:
+            self.send_error(404, f"File Not Found: {file_path}")
+
+def run_server(port, request_monitor, stop_event):
+    handler = partial(MonitoringHandler, request_monitor=request_monitor)
+    server = HTTPServer(('', port), handler)
+    logging.info(f"Server running on port {port}")
+
+    while not stop_event.is_set():
+        try:
+            server.handle_request()
+        except Exception as e:
+            logging.error(f"Server error: {e}")
+
+    logging.info("Server is shutting down...")
+
+if __name__ == "__main__":
+    PORT = 8000
+    REDIRECT_URL = "https://www.cybergenixsecurity.com"  # Set your redirect URL here
+    logging.basicConfig(level=logging.INFO)
+
+    stop_event = threading.Event()
+
+    def signal_handler(signal, frame):
+        logging.info("Received shutdown signal.")
+        stop_event.set()
+
+    signal.signal(signal.SIGINT, signal_handler)
+
+    blockchain = Blockchain()
+    monitor = RequestMonitor(threshold=20, time_window=60, redirect_url=REDIRECT_URL, blockchain=blockchain)
+    server_thread = threading.Thread(target=run_server, args=(PORT, monitor, stop_event))
+    server_thread.start()
+
+    try:
+        while not stop_event.is_set():
+            time.sleep(1)
+    except KeyboardInterrupt:
+        logging.info("Received KeyboardInterrupt. Exiting...")
+        stop_event.set()
+
+    server_thread.join()
+    logging.info("Server has been stopped.")
