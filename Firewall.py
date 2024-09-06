@@ -260,7 +260,7 @@ def run_server(port, request_monitor, stop_event):
 
 if __name__ == "__main__":
     PORT = 8000
-    REDIRECT_URL = "https://www.cybergenixsecurity.com"  # Set your redirect URL here
+    REDIRECT_URL = "https://om1272006.github.io/Ddos-honypot/"  # Set your redirect URL here
     logging.basicConfig(level=logging.INFO)
 
     stop_event = threading.Event()
